@@ -93,7 +93,7 @@ options:
     description:
       - Used for Auto Scaling groups that launch instances into an Amazon Virtual Private Cloud. Specifies whether to assign a public IP address to each instance launched in a Amazon VPC.
     required: false
-    default: false
+    default: None
     aliases: []
     version_added: "1.8"
   ramdisk_id:
@@ -177,12 +177,19 @@ def create_launch_config(connection, module):
     instance_type = module.params.get('instance_type')
     spot_price = module.params.get('spot_price')
     instance_monitoring = module.params.get('instance_monitoring')
-    assign_public_ip = module.params.get('assign_public_ip')
     kernel_id = module.params.get('kernel_id')
     ramdisk_id = module.params.get('ramdisk_id')
     instance_profile_name = module.params.get('instance_profile_name')
     ebs_optimized = module.params.get('ebs_optimized')
     bdm = BlockDeviceMapping()
+
+    if module.params.get('assign_public_ip'):
+        if module.params.get('assign_public_ip') == 'yes':
+            assign_public_ip = True
+        else:
+            assign_public_ip = False
+    else:
+        assign_public_ip = None
 
     if volumes:
         for volume in volumes:
@@ -253,9 +260,8 @@ def main():
             ramdisk_id=dict(type='str'),
             instance_profile_name=dict(type='str'),
             ebs_optimized=dict(default=False, type='bool'),
-            associate_public_ip_address=dict(type='bool'),
             instance_monitoring=dict(default=False, type='bool'),
-            assign_public_ip=dict(default=False, type='bool')
+            assign_public_ip=dict(default=None, choices=['yes','no'])
         )
     )
 
