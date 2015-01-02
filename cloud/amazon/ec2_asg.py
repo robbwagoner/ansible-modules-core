@@ -419,6 +419,7 @@ def replace(connection, module):
     max_size =  module.params.get('max_size')
     min_size =  module.params.get('min_size')
     desired_capacity =  module.params.get('desired_capacity')
+    lc_check = module.params.get('lc_check')
 
     # FIXME: we need some more docs about this feature
     replace_instances = module.params.get('replace_instances')
@@ -441,7 +442,10 @@ def replace(connection, module):
         instances = replace_instances
     for k in props['instance_facts'].keys():
         if k in instances:
-          if  props['instance_facts'][k]['launch_config_name'] != props['launch_config_name']:
+          if lc_check:
+              if props['instance_facts'][k]['launch_config_name'] != props['launch_config_name']:
+                  replaceable += 1
+          else:
               replaceable += 1
     if replaceable == 0:
         changed = False
