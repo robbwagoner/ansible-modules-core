@@ -107,6 +107,8 @@ EXAMPLES = '''
         group_desc: other example EC2 group
 '''
 
+import re
+
 try:
     import boto.ec2
 except ImportError:
@@ -295,8 +297,15 @@ def main():
                 # Otherwise, add new rule
                 else:
                     grantGroup = None
-                    if group_id:
-                        grantGroup = groups[group_id]
+                    try:
+                        if group_id:
+                            grantGroup = groups[group_id]
+                    except KeyError:
+                        if re.match(r'\d{12}/sg-[0-9a-f]{8}',group_id):
+                            # External Security Group in the form: 012345678901/sg-1d2e3a4d
+                            grantGroup = group_id
+                        else:
+                            raise
 
                     if not module.check_mode:
                         group.authorize(rule['proto'], rule['from_port'], rule['to_port'], ip, grantGroup)
