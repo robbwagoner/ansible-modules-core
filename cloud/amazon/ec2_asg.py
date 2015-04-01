@@ -116,7 +116,7 @@ options:
     version_added: "1.8"
   wait_for_instances:
     description:
-      - Wait for the ASG instances to be in a ready state before exiting.  If instances are behind an ELB, it will wait until the ELB determines all instances have a lifecycle_state of  "InService" and  a health_status of "Healthy".
+      - Wait for the ASG instances to be in a ready state before exiting.  If instances are behind an ELB, it will wait until the instances are considered by the ELB.
     version_added: "1.9"
     default: yes
     required: False
@@ -191,6 +191,10 @@ to "replace_instances":
 
 import sys
 import time
+# -----
+import logging
+logging.basicConfig(filename='ec2_asg.log',level=logging.INFO)
+# -----
 
 from ansible.module_utils.basic import *
 from ansible.module_utils.ec2 import *
@@ -272,6 +276,7 @@ def get_properties(autoscaling_group):
 def wait_for_elb(asg_connection, module, group_name):
     region, ec2_url, aws_connect_params = get_aws_connection_info(module)
     wait_timeout = module.params.get('wait_timeout')
+    logging.info("wait_for_elb():")
 
     # if the health_check_type is ELB, we want to query the ELBs directly for instance
     # status as to avoid health_check_grace period that is awarded to ASG instances
@@ -294,6 +299,7 @@ def wait_for_elb(asg_connection, module, group_name):
             for instance, settings in props['instance_facts'].items():
                 if settings['lifecycle_state'] == 'InService' and settings['health_status'] == 'Healthy':
                     instances.append(instance)
+            logging.info(" asg InService instances [{0}]: {1}".format(len(instances),instances))
             for lb in as_group.load_balancers:
                 # we catch a race condition that sometimes happens if the instance exists in the ASG
                 # but has not yet show up in the ELB
@@ -302,6 +308,7 @@ def wait_for_elb(asg_connection, module, group_name):
                 except boto.exception.InvalidInstance, e:
                     pass
                 for i in lb_instances:
+                    logging.info(" elb instance: {0}".format(i))
                     if i.state == "InService":
                         healthy_instances[i.instance_id] = i.state
             time.sleep(10)
@@ -469,7 +476,11 @@ def delete_autoscaling_group(connection, module):
         return changed
 
 def get_chunks(l, n):
-    for i in xrange(0, len(l), n):
+    '''chunks of instances, except for the last chunk
+    which lets the ASG terminate the final chunk when the
+    min_size, max_size, and desired are set back to their
+    normal values'''
+    for i in xrange(0, len(l)-n, n):
         yield l[i:i+n]
 
 def replace(connection, module):
@@ -479,6 +490,7 @@ def replace(connection, module):
     max_size =  module.params.get('max_size')
     min_size =  module.params.get('min_size')
     desired_capacity =  module.params.get('desired_capacity')
+    lc_check = module.params.get('lc_check')
 
     # FIXME: we need some more docs about this feature
     replace_instances = module.params.get('replace_instances')
@@ -490,9 +502,19 @@ def replace(connection, module):
     replaceable = 0
     if replace_instances:
         instances = replace_instances
+    logging.info("replacing instances: {0}".format(instances))
     for k in props['instance_facts'].keys():
         if k in instances:
-          if  props['instance_facts'][k]['launch_config_name'] != props['launch_config_name']:
+          if lc_check:
+              # only replace if the launch configuration name has changed
+              if props['instance_facts'][k]['launch_config_name'] != props['launch_config_name']:
+                  logging.info(" {0} replaceable".format(k))
+                  replaceable += 1
+              else:
+                  logging.info(" {0} not replaceable".format(k))
+          else:
+              # refresh the instances, even if the launch configuration is the same
+	      logging.info(" {0} replaceable".format(k))
               replaceable += 1
     if replaceable == 0:
         changed = False
@@ -500,6 +522,7 @@ def replace(connection, module):
         
     # set temporary settings and wait for them to be reached
     as_group = connection.get_all_groups(names=[group_name])[0]
+    logging.info(" increasing ASG's max_size, min_size, and desired_capacity by batch_size={0}".format(batch_size))
     as_group.max_size = max_size + batch_size
     as_group.min_size = min_size + batch_size
     as_group.desired_capacity = desired_capacity + batch_size
@@ -508,19 +531,18 @@ def replace(connection, module):
     wait_for_elb(connection, module, group_name)
     as_group = connection.get_all_groups(names=[group_name])[0]
     props = get_properties(as_group)
-    instances = props['instances']
-    if replace_instances:
-        instances = replace_instances
     for i in get_chunks(instances, batch_size):
         terminate_batch(connection, module, i)
         wait_for_new_instances(module, connection, group_name, wait_timeout, as_group.min_size, 'viable_instances')
         wait_for_elb(connection, module, group_name)
         as_group = connection.get_all_groups(names=[group_name])[0]
     # return settings to normal
+    logging.info(" descreasing ASG's max_size, min_size, and desired_capacity to their original values")
     as_group.max_size = max_size 
     as_group.min_size = min_size 
     as_group.desired_capacity = desired_capacity
     as_group.update()
+    wait_for_new_instances(module, connection, group_name, wait_timeout, 0, 'terminating_instances')
     as_group = connection.get_all_groups(names=[group_name])[0]
     asg_properties = get_properties(as_group)
     changed=True
@@ -534,6 +556,7 @@ def terminate_batch(connection, module, replace_instances):
     as_group = connection.get_all_groups(names=[group_name])[0]
     props = get_properties(as_group)
 
+    logging.info("terminating batch:")
     # check to make sure instances given are actually in the given ASG
     # and they have a non-current launch config
     old_instances = []
@@ -545,11 +568,11 @@ def terminate_batch(connection, module, replace_instances):
                 old_instances.append(i)
     else:
         old_instances = instances
-
     # set all instances given to unhealthy
     for instance_id in old_instances:
         connection.set_instance_health(instance_id,'Unhealthy')
-    
+        logging.info(" {0} being marked 'Unhealthy'".format(instance_id))
+ 
     # we wait to make sure the machines we marked as Unhealthy are
     # no longer in the list
 
@@ -565,6 +588,7 @@ def terminate_batch(connection, module, replace_instances):
             if  ( instance_facts[i]['lifecycle_state'] == 'Terminating'
                  or instance_facts[i]['health_status'] == 'Unhealthy' ):
                 count += 1
+                logging.info(" {0} is now 'Unhealthy'".format(instance_id))
         time.sleep(10)
 
     if wait_timeout <= time.time():
