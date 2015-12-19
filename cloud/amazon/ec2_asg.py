@@ -254,6 +254,7 @@ def get_properties(autoscaling_group):
     properties['pending_instances'] = 0
     properties['viable_instances'] = 0
     properties['terminating_instances'] = 0
+    properties['instances'] = []
 
     instance_facts = {}
 
